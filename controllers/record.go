@@ -104,11 +104,12 @@ func CreateRecordData(c *gin.Context) {
 	})
 }
 
-// ListRecords handles fetching records associated with the authenticated author with pagination
+// ListRecords handles fetching records associated with the authenticated author with pagination and filtering by number
 func ListRecords(c *gin.Context) {
 	var records []models.Record
 	var limitInt int
 	var pageInt int
+	var numberFilter string
 
 	// Get the JWT token from the Authorization header
 	authHeader := c.GetHeader("Authorization")
@@ -146,8 +147,17 @@ func ListRecords(c *gin.Context) {
 		}
 	}
 
+	// Get the number filter from query parameters (optional)
+	numberFilter = c.DefaultQuery("number", "") // This will be an empty string if no number is provided
+
 	// Build the query to fetch records associated with the author
 	query := config.DB.Where("author ->> 'uid' = ?", author["uid"])
+
+	// If a number filter is provided, apply it to the query
+	if numberFilter != "" {
+		// Use JSON query to search for records where student number matches the given number
+		query = query.Where("student -> 'number' @> ?", fmt.Sprintf(`[{"number":"%s"}]`, numberFilter))
+	}
 
 	// Apply pagination to the query (LIMIT and OFFSET)
 	query = query.Limit(limitInt).Offset((pageInt - 1) * limitInt)
@@ -240,17 +250,21 @@ func UpdateRecordData(c *gin.Context) {
 		return
 	}
 
-	// Build the query to find the record based on verified number(s)
+	// Build the query to find the latest record based on verified number(s)
 	var record models.Record
+	var latestRecord models.Record
+
 	for _, item := range verifiedData {
 		if number, exists := item["number"].(string); exists {
-			// Fetch the record where 'student -> number' matches any of the provided numbers
-			if err := config.DB.Where("student -> 'number' @> ?", fmt.Sprintf(`[{"number":"%s"}]`, number)).First(&record).Error; err != nil {
+			// Fetch the latest record for the number (sorting by timestamp or ID if available)
+			if err := config.DB.Where("student -> 'number' @> ?", fmt.Sprintf(`[{"number":"%s"}]`, number)).
+				Order("created_at DESC").First(&latestRecord).Error; err != nil {
 				log.Printf("Record not found for number: %s", number)
 				continue
 			}
 
-			// If record found for any number, stop further iterations
+			// If a record is found for this number, assign it to the record to be updated
+			record = latestRecord
 			break
 		}
 	}
