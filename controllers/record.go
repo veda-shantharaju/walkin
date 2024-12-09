@@ -157,30 +157,52 @@ func getAuthorFromToken(tokenString string) (map[string]interface{}, error) {
 
 // UpdateRecordData handles the updating of a record's details and file
 func UpdateRecordData(c *gin.Context) {
-	// Get the ID or number from the query parameters
-	recordID := c.DefaultQuery("id", "")
-	recordNumber := c.DefaultQuery("number", "")
+	// Handle form data for verified, comment, and file (record)
+	comment := c.DefaultPostForm("comment", "")
+	file, _ := c.FormFile("record")                  // Get file from form-data
+	verifiedRaw := c.DefaultPostForm("verified", "") // Get verified data from form-data
 
-	// Validate if either ID or number is provided
-	if recordID == "" && recordNumber == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Either 'id' or 'number' must be provided"})
+	// Log the received verified data for debugging
+	log.Println("Received verified data:", verifiedRaw)
+
+	// Check if verified data is provided and properly formatted
+	var verifiedData []map[string]interface{}
+	if verifiedRaw != "" {
+		if err := json.Unmarshal([]byte(verifiedRaw), &verifiedData); err != nil {
+			log.Printf("Failed to unmarshal verified data. Input: %s, Error: %v", verifiedRaw, err)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid verified data format. Ensure it is a valid JSON array.",
+				"details": err.Error(),
+			})
+			return
+		}
+	}
+
+	// If no verified data is provided, return an error
+	if len(verifiedData) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Verified data must be provided"})
 		return
 	}
 
-	// Retrieve the existing record from the database based on either ID or number
+	// Build the query to find the record based on verified number(s)
 	var record models.Record
-	if recordID != "" {
-		// Fetch by ID
-		if err := config.DB.First(&record, recordID).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Record not found"})
-			return
+	for _, item := range verifiedData {
+		if number, exists := item["number"].(string); exists {
+			// Fetch the record where 'student -> number' matches any of the provided numbers
+			if err := config.DB.Where("student -> 'number' @> ?", fmt.Sprintf(`[{"number":"%s"}]`, number)).First(&record).Error; err != nil {
+				log.Printf("Record not found for number: %s", number)
+				continue
+			}
+
+			// If record found for any number, stop further iterations
+			break
 		}
-	} else {
-		// Fetch by number (search in the 'student' column for the 'number' field)
-		if err := config.DB.Where("student -> 'number' @> ?", fmt.Sprintf(`[{"number":"%s"}]`, recordNumber)).First(&record).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Record not found"})
-			return
-		}
+	}
+
+	// Check if record is found, otherwise return an error
+	if record.ID == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Record not found"})
+		return
 	}
 
 	// Get the JWT token from the Authorization header
@@ -211,27 +233,6 @@ func UpdateRecordData(c *gin.Context) {
 	if recordAuthor["uid"] != author["uid"] {
 		c.JSON(http.StatusForbidden, gin.H{"error": "You are not authorized to update this record"})
 		return
-	}
-
-	// Handle form data for verified, comment, and file (record)
-	comment := c.DefaultPostForm("comment", "")
-	file, _ := c.FormFile("record")                  // Get file from form-data
-	verifiedRaw := c.DefaultPostForm("verified", "") // Get verified data from form-data
-
-	// Log the received verified data for debugging
-	log.Println("Received verified data:", verifiedRaw)
-
-	// Check if verified data is provided and properly formatted
-	var verifiedData []map[string]interface{}
-	if verifiedRaw != "" {
-		if err := json.Unmarshal([]byte(verifiedRaw), &verifiedData); err != nil {
-			log.Printf("Failed to unmarshal verified data. Input: %s, Error: %v", verifiedRaw, err)
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error":   "Invalid verified data format. Ensure it is a valid JSON array.",
-				"details": err.Error(),
-			})
-			return
-		}
 	}
 
 	// Prepare the details map for the update
