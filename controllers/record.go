@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"walkin/config"
@@ -103,9 +104,11 @@ func CreateRecordData(c *gin.Context) {
 	})
 }
 
-// ListRecords handles fetching records associated with the authenticated author
+// ListRecords handles fetching records associated with the authenticated author with pagination
 func ListRecords(c *gin.Context) {
 	var records []models.Record
+	var limitInt int
+	var pageInt int
 
 	// Get the JWT token from the Authorization header
 	authHeader := c.GetHeader("Authorization")
@@ -124,8 +127,33 @@ func ListRecords(c *gin.Context) {
 		return
 	}
 
+	// Default pagination values
+	pageInt = 1
+	limitInt = 10 // Default limit
+
+	// Handle pagination (page and limit)
+	if page, ok := c.GetQuery("page"); ok {
+		if pageInt, err = strconv.Atoi(page); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid page"})
+			return
+		}
+	}
+
+	if limit, ok := c.GetQuery("limit"); ok {
+		if limitInt, err = strconv.Atoi(limit); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid limit"})
+			return
+		}
+	}
+
 	// Build the query to fetch records associated with the author
-	if err := config.DB.Where("author ->> 'uid' = ?", author["uid"]).Find(&records).Error; err != nil {
+	query := config.DB.Where("author ->> 'uid' = ?", author["uid"])
+
+	// Apply pagination to the query (LIMIT and OFFSET)
+	query = query.Limit(limitInt).Offset((pageInt - 1) * limitInt)
+
+	// Execute the query
+	if err := query.Find(&records).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch records"})
 		return
 	}
@@ -137,7 +165,12 @@ func ListRecords(c *gin.Context) {
 	}
 
 	// Response with the records associated with the author
-	c.JSON(http.StatusOK, gin.H{"data": records})
+	c.JSON(http.StatusOK, gin.H{
+		"data":  records,
+		"page":  pageInt,
+		"limit": limitInt,
+		"total": len(records), // You can adjust this to total records in DB if needed
+	})
 }
 
 // Function to decode JWT token and get the entire claims as author data
