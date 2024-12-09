@@ -103,17 +103,40 @@ func CreateRecordData(c *gin.Context) {
 	})
 }
 
-// ListRecords handles fetching all the records
+// ListRecords handles fetching records associated with the authenticated author
 func ListRecords(c *gin.Context) {
 	var records []models.Record
 
-	// Fetch all records from the database
-	if err := config.DB.Find(&records).Error; err != nil {
+	// Get the JWT token from the Authorization header
+	authHeader := c.GetHeader("Authorization")
+	if authHeader == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Authorization header is missing"})
+		return
+	}
+
+	// Extract the token from the "Bearer <token>" format
+	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+
+	// Decode the token and get the author
+	author, err := getAuthorFromToken(tokenString)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Build the query to fetch records associated with the author
+	if err := config.DB.Where("author ->> 'uid' = ?", author["uid"]).Find(&records).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch records"})
 		return
 	}
 
-	// Response with all records
+	// If no records are found for the author, return an empty array
+	if len(records) == 0 {
+		c.JSON(http.StatusOK, gin.H{"data": []interface{}{}})
+		return
+	}
+
+	// Response with the records associated with the author
 	c.JSON(http.StatusOK, gin.H{"data": records})
 }
 
