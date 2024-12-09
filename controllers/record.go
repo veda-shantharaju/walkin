@@ -35,11 +35,14 @@ func CreateRecordData(c *gin.Context) {
 
 	// Define the payload struct for student data
 	type Student struct {
-		Name   string   `json:"name"`
-		Email  []string `json:"email"`
+		Name  string `json:"name"`
+		Email []struct {
+			Email string `json:"email"`
+		} `json:"email"`
 		Number []struct {
-			Number      string `json:"number"`
-			CountryCode string `json:"country_code"`
+			Number      string      `json:"number"`
+			CountryCode string      `json:"country_code"`
+			Verified    interface{} `json:"verified"` // Keep null by default
 		} `json:"number"`
 	}
 
@@ -55,6 +58,13 @@ func CreateRecordData(c *gin.Context) {
 	if err := c.ShouldBindJSON(&request); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON input"})
 		return
+	}
+
+	// Ensure the `verified` field defaults to `null` if not provided
+	for i, number := range request.Student.Number {
+		if number.Verified == nil {
+			request.Student.Number[i].Verified = nil
+		}
 	}
 
 	// Marshal the student data into JSON
