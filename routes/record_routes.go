@@ -11,7 +11,7 @@ func RecordRoutes(router *gin.Engine) {
 	api := router.Group("/records") // This creates the /records route group
 	{
 		// Route for creating a record
-		api.POST("/", controllers.CreateRecord)
+		api.POST("/", controllers.CreateRecordData)
 
 		api.POST("/records-data", controllers.UpdateRecordData)
 

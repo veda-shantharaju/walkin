@@ -12,53 +12,84 @@ import (
 
 	// For decoding JWT token
 	"github.com/gin-gonic/gin"
-	"gorm.io/datatypes"
 )
 
-// CreateRecord handles the creation of a new record
-func CreateRecord(c *gin.Context) {
-	// Input struct for receiving JSON data
-	var input struct {
-		Name  string `json:"name"`
-		Email []struct {
-			Email   string `json:"email"`
-			Primary bool   `json:"primary"`
-		} `json:"email"`
+// CreateRecordData handles the creation of a new record with student and author info
+func CreateRecordData(c *gin.Context) {
+	// Get the JWT token from the Authorization header
+	authHeader := c.GetHeader("Authorization")
+	if authHeader == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Authorization header is missing"})
+		return
+	}
+
+	// Extract the token from the "Bearer <token>" format
+	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+
+	// Decode the token and get the author
+	author, err := getAuthorFromToken(tokenString)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Define the payload struct for student data
+	type Student struct {
+		Name   string   `json:"name"`
+		Email  []string `json:"email"`
 		Number []struct {
-			Number  string `json:"number"`
-			Primary bool   `json:"primary"`
+			Number      string `json:"number"`
+			CountryCode string `json:"country_code"`
 		} `json:"number"`
 	}
 
-	// Bind the input body to the struct
-	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	// Define the incoming request body structure
+	type CreateRecordRequest struct {
+		Student Student `json:"student"`
+	}
+
+	// Initialize the incoming request data
+	var request CreateRecordRequest
+
+	// Parse the JSON request body
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON input"})
 		return
 	}
 
-	// Prepare the details for the new record (without "details")
-	newDetails := map[string]interface{}{
-		"name":   input.Name,
-		"email":  input.Email,
-		"number": input.Number,
-	}
-
-	// Convert the newDetails map to JSON format
-	newDetailsJSON, _ := json.Marshal(newDetails)
-
-	// Create a new record with the provided data
-	newRecord := models.Record{
-		Details: datatypes.JSON(newDetailsJSON),
-	}
-
-	// Save the new record to the database
-	if err := config.DB.Create(&newRecord).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create record"})
+	// Marshal the student data into JSON
+	studentJSON, err := json.Marshal(request.Student)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal student data"})
 		return
 	}
 
-	// Return the newly created record
-	c.JSON(http.StatusCreated, gin.H{"message": "Record created successfully", "record": newRecord})
+	// Marshal the author data into JSON
+	authorJSON, err := json.Marshal(author)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal author data"})
+		return
+	}
+
+	// Create the record in the database
+	record := models.Record{
+		Student:   studentJSON, // Store the marshaled student data as JSON in the "Student" column
+		Author:    authorJSON,  // Store the marshaled author data as JSON in the "Author" column
+		CreatedAt: time.Now(),  // Set the creation timestamp
+		UpdatedAt: time.Now(),  // Set the updated timestamp
+	}
+
+	// Save the new record in the database
+	if err := config.DB.Create(&record).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save the record"})
+		return
+	}
+
+	// Return the created record response
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Record created successfully",
+		"record":  record,
+	})
 }
 
 // ListRecords handles fetching all the records
@@ -113,24 +144,32 @@ func getAuthorFromToken(tokenString string) (map[string]interface{}, error) {
 	return claims, nil
 }
 
-// UpdateRecordData handles the updating of a record's data
+// UpdateRecordData handles the updating of a record's details and file
 func UpdateRecordData(c *gin.Context) {
-	// Get the ID from the query parameters
-	recordID := c.DefaultQuery("id", "0")
+	// Get the ID or number from the query parameters
+	recordID := c.DefaultQuery("id", "")
+	recordNumber := c.DefaultQuery("number", "")
 
-	// Convert the ID to uint
-	var id uint
-	_, err := fmt.Sscanf(recordID, "%d", &id)
-	if err != nil || id == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid ID"})
+	// Validate if either ID or number is provided
+	if recordID == "" && recordNumber == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Either 'id' or 'number' must be provided"})
 		return
 	}
 
-	// Retrieve the existing record from the database
+	// Retrieve the existing record from the database based on either ID or number
 	var record models.Record
-	if err := config.DB.First(&record, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Record not found"})
-		return
+	if recordID != "" {
+		// Fetch by ID
+		if err := config.DB.First(&record, recordID).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Record not found"})
+			return
+		}
+	} else {
+		// Fetch by number (search in the 'student' column for the 'number' field)
+		if err := config.DB.Where("student -> 'number' @> ?", fmt.Sprintf(`[{"number":"%s"}]`, recordNumber)).First(&record).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Record not found"})
+			return
+		}
 	}
 
 	// Get the JWT token from the Authorization header
@@ -150,8 +189,32 @@ func UpdateRecordData(c *gin.Context) {
 		return
 	}
 
-	// Handle file upload (if any)
-	file, _ := c.FormFile("record")
+	// Unmarshal the author from the record's details and compare with the token's author
+	var recordAuthor map[string]interface{}
+	if err := json.Unmarshal(record.Author, &recordAuthor); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse record author"})
+		return
+	}
+
+	// Check if the author UID from the token matches the UID in the record's author
+	if recordAuthor["uid"] != author["uid"] {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You are not authorized to update this record"})
+		return
+	}
+
+	// Handle form data for verified, comment, and file (record)
+	verified := c.DefaultPostForm("verified", "false") // Default to false if not provided
+	comment := c.DefaultPostForm("comment", "")
+	file, _ := c.FormFile("record") // Get file from form-data
+
+	// Prepare the details map for the update
+	details := map[string]interface{}{
+		"verified": verified,
+		"comment":  comment,
+		"type":     "walkin", // Example, this could be dynamic if needed
+	}
+
+	// If a file is uploaded, save it and update the record data field
 	if file != nil {
 		// Define the path to save the file
 		savePath := "media/" + file.Filename
@@ -162,62 +225,22 @@ func UpdateRecordData(c *gin.Context) {
 			return
 		}
 
-		// Create the new data to be appended
-		newRecordData := map[string]interface{}{
-			"verified": "true",
-			"record":   savePath, // Save the file path in the record data
-			"comment":  "Updated comment",
-			"created":  time.Now().Format(time.RFC3339),
-			"author":   author,
-		}
-
-		// Append to the record's record_data
-		var currentData []map[string]interface{}
-		if err := json.Unmarshal(record.Record_data, &currentData); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse existing record_data"})
-			return
-		}
-		currentData = append(currentData, newRecordData)
-
-		// Update the record_data in the record
-		updatedRecordData, err := json.Marshal(currentData)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal updated record_data"})
-			return
-		}
-		record.Record_data = updatedRecordData
-	} else {
-		// If no file is uploaded, update without file data
-		newRecordData := map[string]interface{}{
-			"verified": "true",
-			"comment":  "Updated comment",
-			"created":  time.Now().Format(time.RFC3339),
-			"author":   author,
-		}
-
-		// Append to the record's record_data
-		var currentData []map[string]interface{}
-		if err := json.Unmarshal(record.Record_data, &currentData); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse existing record_data"})
-			return
-		}
-		currentData = append(currentData, newRecordData)
-
-		// Update the record_data in the record
-		updatedRecordData, err := json.Marshal(currentData)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal updated record_data"})
-			return
-		}
-		record.Record_data = updatedRecordData
+		// Update the record's record_data with the file path
+		record.Record = savePath
 	}
 
-	// Save the updated record
+	// Update the details field with the new values (verified, comment, type)
+	record.Details, _ = json.Marshal(details)
+
+	// Save the updated record to the database
 	if err := config.DB.Save(&record).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save record"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update record"})
 		return
 	}
 
 	// Return the updated record
-	c.JSON(http.StatusOK, gin.H{"message": "Record updated successfully", "record": record})
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Record updated successfully",
+		"record":  record,
+	})
 }
