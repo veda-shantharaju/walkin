@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -213,15 +214,63 @@ func UpdateRecordData(c *gin.Context) {
 	}
 
 	// Handle form data for verified, comment, and file (record)
-	verified := c.DefaultPostForm("verified", "false") // Default to false if not provided
 	comment := c.DefaultPostForm("comment", "")
-	file, _ := c.FormFile("record") // Get file from form-data
+	file, _ := c.FormFile("record")                  // Get file from form-data
+	verifiedRaw := c.DefaultPostForm("verified", "") // Get verified data from form-data
+
+	// Log the received verified data for debugging
+	log.Println("Received verified data:", verifiedRaw)
+
+	// Check if verified data is provided and properly formatted
+	var verifiedData []map[string]interface{}
+	if verifiedRaw != "" {
+		if err := json.Unmarshal([]byte(verifiedRaw), &verifiedData); err != nil {
+			log.Printf("Failed to unmarshal verified data. Input: %s, Error: %v", verifiedRaw, err)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid verified data format. Ensure it is a valid JSON array.",
+				"details": err.Error(),
+			})
+			return
+		}
+	}
 
 	// Prepare the details map for the update
 	details := map[string]interface{}{
-		"verified": verified,
-		"comment":  comment,
-		"type":     "walkin", // Example, this could be dynamic if needed
+		"comment": comment,
+		"type":    "walkin", // Example, this could be dynamic if needed
+	}
+
+	// If verified data is provided, update the corresponding numbers in the student data
+	if len(verifiedData) > 0 {
+		var student map[string]interface{}
+		if err := json.Unmarshal(record.Student, &student); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse student data"})
+			return
+		}
+
+		// Iterate over the numbers in the verified data and update their status
+		for _, item := range verifiedData {
+			if number, exists := item["number"].(string); exists {
+				for i, num := range student["number"].([]interface{}) {
+					numberObj := num.(map[string]interface{})
+					if numberObj["number"] == number {
+						// Update the verified status for this number
+						numberObj["verified"] = item["verified"]
+						student["number"].([]interface{})[i] = numberObj
+					}
+				}
+			}
+		}
+
+		// Marshal the updated student data
+		updatedStudentJSON, err := json.Marshal(student)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal updated student data"})
+			return
+		}
+
+		// Update the student field with the new data
+		record.Student = updatedStudentJSON
 	}
 
 	// If a file is uploaded, save it and update the record data field
@@ -229,14 +278,14 @@ func UpdateRecordData(c *gin.Context) {
 		// Define the path to save the file
 		savePath := "media/" + file.Filename
 
-		// Save the file to the media directory
+		// Save the file to the media directory (or wherever you prefer)
 		if err := c.SaveUploadedFile(file, savePath); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save file"})
 			return
 		}
 
-		// Update the record's record_data with the file path
-		record.Record = savePath
+		// Update the record's record_data with the file name
+		record.Record = file.Filename
 	}
 
 	// Update the details field with the new values (verified, comment, type)
